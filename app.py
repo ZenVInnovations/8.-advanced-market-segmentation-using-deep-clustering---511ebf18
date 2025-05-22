@@ -12,6 +12,7 @@ import streamlit as st
 import plotly.express as px
 import plotly.graph_objects as go
 
+# Suppress TensorFlow warnings
 os.environ["TF_CPP_MIN_LOG_LEVEL"] = "2"
 
 # Streamlit app title
@@ -82,9 +83,12 @@ if uploaded_file is not None:
     autoencoder.compile(optimizer='adam', loss='mean_squared_error')
 
     # Train autoencoder
-    split_idx = int(0.8 * len(df_pca))
-    X_train, X_val = df_pca[:split_idx], df_pca[split_idx:]
-    autoencoder.fit(X_train, X_train, epochs=50, batch_size=256, validation_data=(X_val, X_val), verbose=0)
+    with st.spinner('Training autoencoder model (this may take a few moments)...'):
+        split_idx = int(0.8 * len(df_pca))
+        X_train, X_val = df_pca[:split_idx], df_pca[split_idx:]
+        autoencoder.fit(X_train, X_train, epochs=50, batch_size=256, validation_data=(X_val, X_val), verbose=0)
+    
+    st.success("Autoencoder training complete!")
 
     # Get encoded representation
     encoder = Model(input_layer, encoded)
@@ -94,14 +98,22 @@ if uploaded_file is not None:
     n_clusters = st.number_input("Select number of clusters", min_value=2, max_value=10, value=5)
 
     # K-Means clustering
-    kmeans = KMeans(n_clusters=n_clusters, random_state=42)
-    kmeans.fit(X_encoded)
-
+    with st.spinner('Performing clustering...'):
+        kmeans = KMeans(n_clusters=n_clusters, random_state=42)
+        kmeans.fit(X_encoded)
+    
     # Save models
-    autoencoder.save("autoencoder_model.keras")
-    pickle.dump(kmeans, open("kmeans_model.pkl", "wb"))
-    pickle.dump(scaler, open("scaler.pkl", "wb"))
-    pickle.dump(pca, open("pca.pkl", "wb"))
+    try:
+        autoencoder.save("autoencoder_model.keras")
+        with open("kmeans_model.pkl", "wb") as f:
+            pickle.dump(kmeans, f)
+        with open("scaler.pkl", "wb") as f:
+            pickle.dump(scaler, f)
+        with open("pca.pkl", "wb") as f:
+            pickle.dump(pca, f)
+        st.success("Models saved successfully!")
+    except Exception as e:
+        st.warning(f"Could not save models: {e}")
 
     # Assign clusters
     df['Cluster'] = kmeans.labels_
@@ -113,7 +125,7 @@ if uploaded_file is not None:
     cluster_counts = df['Cluster'].value_counts().reset_index()
     cluster_counts.columns = ['Customer Group', 'Number of Customers']
     fig1 = px.bar(cluster_counts, x='Customer Group', y='Number of Customers', color='Customer Group')
-    st.plotly_chart(fig1)
+    st.plotly_chart(fig1, use_container_width=True)
 
     # 2D visualization
     st.subheader("Customer Groups in 2D Space")
@@ -122,18 +134,22 @@ if uploaded_file is not None:
     df_pca_2d = pd.DataFrame(df_pca_2d, columns=['PC1', 'PC2'])
     df_pca_2d['Cluster'] = df['Cluster']
     fig2 = px.scatter(df_pca_2d, x='PC1', y='PC2', color='Cluster', title="2D Projection of Clusters")
-    st.plotly_chart(fig2)
+    st.plotly_chart(fig2, use_container_width=True)
 
     # Key metrics across groups
     st.subheader("What Makes Each Group Different?")
-    feature_importance = df.groupby('Cluster')[numerical_cols].mean().reset_index()
-    fig3 = px.box(feature_importance, x='Cluster', y=numerical_cols)
-    st.plotly_chart(fig3)
+    # Use up to 8 numerical columns to avoid overcrowding
+    display_cols = numerical_cols[:8] if len(numerical_cols) > 8 else numerical_cols
+    feature_importance = df.groupby('Cluster')[display_cols].mean().reset_index()
+    fig3 = px.box(df, x='Cluster', y=display_cols)
+    st.plotly_chart(fig3, use_container_width=True)
 
     # Metric relationships
     st.subheader("How Customer Metrics Relate")
-    fig4 = px.scatter_matrix(df, dimensions=numerical_cols[:5], color='Cluster')
-    st.plotly_chart(fig4)
+    # Use up to 5 numerical columns for scatter matrix
+    scatter_cols = numerical_cols[:5] if len(numerical_cols) > 5 else numerical_cols
+    fig4 = px.scatter_matrix(df, dimensions=scatter_cols, color='Cluster')
+    st.plotly_chart(fig4, use_container_width=True)
 
     # 3D visualization
     st.subheader("Customer Groups in 3D")
@@ -142,33 +158,61 @@ if uploaded_file is not None:
     df_pca_3d = pd.DataFrame(df_pca_3d, columns=['PC1', 'PC2', 'PC3'])
     df_pca_3d['Cluster'] = df['Cluster']
     fig5 = px.scatter_3d(df_pca_3d, x='PC1', y='PC2', z='PC3', color='Cluster')
-    st.plotly_chart(fig5)
+    st.plotly_chart(fig5, use_container_width=True)
 
     # Radar charts per group
     st.subheader("Strengths of Each Group")
     cluster_means = df.groupby('Cluster')[numerical_cols].mean().reset_index()
-    radar_features = numerical_cols[:5]
-    for cluster in cluster_means['Cluster']:
-        fig6 = go.Figure()
-        fig6.add_trace(go.Scatterpolar(
-            r=cluster_means[cluster_means['Cluster'] == cluster][radar_features].values.flatten(),
-            theta=[col.replace("_", " ").title() for col in radar_features],
-            fill='toself',
-            name=f'Group {cluster}'
-        ))
-        fig6.update_layout(
-            polar=dict(radialaxis=dict(visible=True)),
-            showlegend=True,
-            title=f"Group {cluster} Profile"
-        )
-        st.plotly_chart(fig6)
+    # Choose up to 8 features for radar chart to keep it readable
+    radar_features = numerical_cols[:8] if len(numerical_cols) > 8 else numerical_cols
+    
+    radar_cols = st.columns(min(3, n_clusters))
+    for i, cluster in enumerate(sorted(cluster_means['Cluster'].unique())):
+        col_idx = i % len(radar_cols)
+        with radar_cols[col_idx]:
+            fig6 = go.Figure()
+            fig6.add_trace(go.Scatterpolar(
+                r=cluster_means[cluster_means['Cluster'] == cluster][radar_features].values.flatten(),
+                theta=[col.replace("_", " ").title() for col in radar_features],
+                fill='toself',
+                name=f'Group {cluster}'
+            ))
+            fig6.update_layout(
+                polar=dict(radialaxis=dict(visible=True)),
+                showlegend=True,
+                title=f"Group {cluster} Profile"
+            )
+            st.plotly_chart(fig6, use_container_width=True)
 
     # Heatmap comparison
     st.subheader("Compare Groups Across All Metrics")
     fig7 = px.imshow(df.groupby('Cluster')[numerical_cols].mean(),
                      labels=dict(x="Metrics", y="Cluster", color="Value"),
                      title="Metric Comparison Across Groups")
-    st.plotly_chart(fig7)
+    st.plotly_chart(fig7, use_container_width=True)
+    
+    # Export results
+    if st.button("Export Segmentation Results"):
+        try:
+            # Add cluster labels to original data
+            result_df = df.copy()
+            result_df.to_csv("customer_segments_results.csv", index=False)
+            st.success("Results exported to 'customer_segments_results.csv'")
+        except Exception as e:
+            st.error(f"Failed to export results: {e}")
 
 else:
     st.info("Please upload a CSV file to begin.")
+    
+    # Show example application
+    st.subheader("How It Works")
+    st.markdown("""
+    1. *Upload Data*: Start by uploading a CSV file containing your customer data
+    2. *Data Processing*: The app automatically handles missing values and encodes categorical features
+    3. *Dimensionality Reduction*: Uses PCA to reduce complexity while preserving information
+    4. *Deep Feature Extraction*: An autoencoder learns meaningful patterns in your data
+    5. *Clustering*: Customers are grouped based on their characteristics
+    6. *Visualization*: Explore the segments through interactive charts
+    
+    This tool combines deep learning and clustering to find natural customer segments in your data!
+    """)
